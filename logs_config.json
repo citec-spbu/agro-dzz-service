@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "formatters": {
+    "simple": {
+      "format": " %(levelname)s [%(asctime)s] %(name)s - %(message)s"
+    }
+  },
+  "handlers": {
+    "stdout": {
+      "class": "logging.StreamHandler",
+      "formatter": "simple",
+      "stream": "ext://sys.stdout"
+    }
+  },
+  "loggers": {
+    "root": {
+      "level": "INFO",
+      "handlers": ["stdout"]
+    },
+    "httpx": {
+      "level": "CRITICAL"
+    },
+    "httpcore": {
+      "level": "CRITICAL"
+    }
+  }
+}

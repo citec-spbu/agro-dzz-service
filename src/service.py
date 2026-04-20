@@ -242,7 +242,7 @@ class DzzService:
         resolved_date_from, resolved_date_to = self._resolve_date_range(date_from, date_to)
         if scene_id_a == scene_id_b:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Choose two different scenes for comparison.",
             )
 
@@ -368,7 +368,7 @@ class DzzService:
         if not polygons:
             suffix = f" for field {field_id}." if field_id else "."
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Unable to build geometry{suffix}",
             )
 
@@ -981,7 +981,7 @@ class DzzService:
         finite_mask = np.isfinite(data)
         if not finite_mask.any():
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"No valid pixels found for {index_name.upper()} scene overlay.",
             )
 
@@ -1058,7 +1058,7 @@ class DzzService:
     def _validate_compare_pair(scene_a: DzzSceneSchema, scene_b: DzzSceneSchema) -> None:
         if scene_a.sensor != scene_b.sensor:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Comparison is supported only for scenes from the same sensor.",
             )
 
@@ -1077,7 +1077,7 @@ class DzzService:
         if "x" in array.coords and "y" in array.coords and "x" in reference.coords and "y" in reference.coords:
             return array.reindex(x=reference["x"], y=reference["y"], method="nearest")
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Unable to align scene rasters for comparison.",
         )
 
@@ -1159,7 +1159,7 @@ class DzzService:
         if normalized in VALID_INDICES:
             return normalized
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Unsupported index '{index_name}'. Allowed values: {sorted(VALID_INDICES)}.",
         )
 
@@ -1173,7 +1173,7 @@ class DzzService:
         resolved_to = date_to or (today + timedelta(days=settings.DAYS_FORWARD))
         if resolved_from > resolved_to:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="dateFrom must be less than or equal to dateTo.",
             )
         return resolved_from, resolved_to

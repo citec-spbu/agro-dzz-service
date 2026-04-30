@@ -1,35 +1,26 @@
-# DZZ microservice
+# agro-dzz-service
 
-Микросервис для ДЗЗ-аналитики в "Цифровом двойнике".
+Микросервис ДЗЗ-аналитики: поиск сцен, агрегации индексов и отдача данных для фронтенда.
 
 ## Стек
 - Python 3.11
 - FastAPI
 - Planetary Computer STAC
-- odc-stac
-- Shapely
+- Shapely / Rasterio / ODC-STAC
 
-## Что умеет MVP
-- получать контуры поля через `api-gateway`;
-- искать спутниковые сцены по полю;
-- строить каталог сцен;
-- считать временной ряд NDVI/EVI/NDWI/MSAVI;
-- отдавать summary для фронта.
-
-## Документация
-- Пользовательское описание полей, сцен, статусов и экранов: `../docs/dzz-user-guide.md`
-
-## Запуск
-Если не создана docker-сеть `agronetwork`, то:
-
+## Быстрый запуск
 ```bash
-docker network create agronetwork
+docker network create agronetwork 2>/dev/null || true
+docker compose up -d --build
 ```
 
-Из корневой папки проекта:
+Сервис доступен на `http://localhost:8005`, Swagger - `http://localhost:8005/docs`.
 
-```bash
-docker compose up -d
-```
+## Переменные окружения
+Конфигурация хранится в `.env` и подключается через `docker-compose.yml`.
 
-Swagger: `http://0.0.0.0:8005/docs`
+## Возможности
+- получение контуров поля;
+- поиск спутниковых сцен;
+- расчёт временных рядов NDVI/EVI/NDWI/MSAVI;
+- выдача агрегированных данных для интерфейса.

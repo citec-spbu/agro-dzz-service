@@ -7,10 +7,13 @@ on:
     branches: [prod]
   workflow_dispatch:
 
+env:
+  COMPOSE_SERVICE: dzz-service
+  SOURCE_DIR: agro-dzz-service
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,7 +38,6 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     needs: build
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,8 +66,45 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: tests
-    if: ${{ false }}
-
+    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
     steps:
-      - name: Deploy placeholder
-        run: echo "Deploy disabled. SSH access is not configured yet."
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "${SSH_PORT:-22}" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Rsync sources to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SOURCES_PATH: ${{ secrets.SOURCES_PATH }}
+        run: |
+          rsync -az --delete \
+            --exclude='.git' --exclude='node_modules' --exclude='.venv' \
+            --exclude='target' --exclude='dist' --exclude='.idea' --exclude='.pytest_cache' \
+            -e "ssh -p ${SSH_PORT:-22} -i ~/.ssh/id_ed25519" \
+            ./ "${SSH_USER}@${SSH_HOST}:${SOURCES_PATH}/${SOURCE_DIR}/"
+
+      - name: Build & up on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: ${{ secrets.SSH_PORT || 22 }}
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_PATH }}"
+            docker compose -f docker-compose.prod.yml build "${{ env.COMPOSE_SERVICE }}"
+            docker compose -f docker-compose.prod.yml up -d --no-deps "${{ env.COMPOSE_SERVICE }}"
+            docker image prune -f || true

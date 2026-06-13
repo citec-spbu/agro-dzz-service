@@ -2,7 +2,11 @@ import uuid
 from datetime import UTC, date, datetime
 
 from src import persistence as persistence_module
-from src.persistence import DzzPersistence, DzzSceneAnalyticsRecord
+from src.persistence import (
+    DzzPersistence,
+    DzzSceneAnalyticsRecord,
+    DzzSceneOverlayRecord,
+)
 
 
 def make_record(
@@ -58,3 +62,64 @@ def test_persistence_filters_by_contour_and_date_range(tmp_path, monkeypatch) ->
     )
 
     assert [row.scene_id for row in rows] == ["scene-b"]
+
+
+def make_overlay(
+    field_id: uuid.UUID,
+    scene_id: str,
+    index_name: str,
+    contour_id: str | None = None,
+) -> DzzSceneOverlayRecord:
+    return DzzSceneOverlayRecord(
+        field_id=field_id,
+        season_id=None,
+        contour_id=contour_id,
+        scene_id=scene_id,
+        index_name=index_name,
+        scene_date=date(2026, 4, 1),
+        sensor="S2",
+        collection="sentinel-2-l2a",
+        mode="single",
+        image_url="data:image/png;base64,AAAA",
+        bounds=[[55.0, 37.0], [55.1, 37.1]],
+        display_min=-1.0,
+        display_max=1.0,
+        actual_min=0.1,
+        actual_max=0.6,
+        mean_value=0.4,
+        updated_at=datetime.now(UTC),
+    )
+
+
+def test_scene_overlay_round_trip_and_upsert(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "dzz-overlay-test.sqlite"
+    monkeypatch.setattr(
+        persistence_module.settings,
+        "DATABASE_URL",
+        f"sqlite:///{db_path}",
+    )
+    storage = DzzPersistence()
+    storage.init_schema()
+
+    field_id = uuid.uuid4()
+    contour_id = str(uuid.uuid4())
+    storage.upsert_scene_overlays([make_overlay(field_id, "scene-a", "ndvi", contour_id)])
+
+    fetched = storage.fetch_scene_overlay(field_id, None, contour_id, "scene-a", "ndvi")
+    assert fetched is not None
+    assert fetched.image_url == "data:image/png;base64,AAAA"
+    assert fetched.bounds == [[55.0, 37.0], [55.1, 37.1]]
+    assert fetched.index_name == "ndvi"
+
+    updated = make_overlay(field_id, "scene-a", "ndvi", contour_id)
+    updated = DzzSceneOverlayRecord(
+        **{**updated.__dict__, "image_url": "data:image/png;base64,BBBB"}
+    )
+    storage.upsert_scene_overlays([updated])
+
+    refetched = storage.fetch_scene_overlay(field_id, None, contour_id, "scene-a", "ndvi")
+    assert refetched is not None
+    assert refetched.image_url == "data:image/png;base64,BBBB"
+
+    missing = storage.fetch_scene_overlay(field_id, None, contour_id, "scene-a", "evi")
+    assert missing is None

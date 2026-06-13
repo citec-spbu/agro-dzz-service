@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,7 +8,7 @@ import xarray as xr
 from fastapi import HTTPException
 
 import src.service as service_module
-from src.persistence import DzzSceneAnalyticsRecord
+from src.persistence import DzzSceneAnalyticsRecord, DzzSceneOverlayRecord
 from src.schemas.dzz import DzzSceneSchema
 from src.schemas.fields import ContourSchema, CoordinatesSchema, CropRotationSchema
 from src.service import DzzService, FieldContext
@@ -105,7 +105,18 @@ def service(monkeypatch: pytest.MonkeyPatch) -> DzzService:
         "fetch_scene_analytics",
         lambda *_args, **_kwargs: [],
     )
+    monkeypatch.setattr(
+        service_module.storage,
+        "fetch_scene_overlay",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        service_module.storage,
+        "upsert_scene_overlays",
+        lambda _rows: None,
+    )
     instance = DzzService()
+    monkeypatch.setattr(instance, "_backfill_missing_overlays", lambda *_args, **_kwargs: None)
     return instance
 
 
@@ -155,40 +166,62 @@ async def test_get_culture_context_uses_active_crop_rotation(
 
 
 @pytest.mark.asyncio
-async def test_get_index_map_returns_overlay_payload(
+async def test_get_index_map_returns_persisted_overlay(
     service: DzzService, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     field_id = uuid.uuid4()
-    contours = [make_contour(str(uuid.uuid4()), "Контур A")]
-    scene = make_scene(field_id, "scene-a", -1)
-    items_by_id = {
-        "scene-a": SimpleNamespace(
-            id="scene-a",
-            collection_id="sentinel-2-l2a",
-            properties={"eo:cloud_cover": 2.5},
+    record = DzzSceneOverlayRecord(
+        field_id=field_id,
+        season_id=None,
+        contour_id=None,
+        scene_id="scene-a",
+        index_name="ndvi",
+        scene_date=date(2026, 4, 1),
+        sensor="S2",
+        collection="sentinel-2-l2a",
+        mode="single",
+        image_url="data:image/png;base64,AAAA",
+        bounds=[[55.0, 37.0], [55.1, 37.1]],
+        display_min=-1.0,
+        display_max=1.0,
+        actual_min=0.1,
+        actual_max=0.6,
+        mean_value=0.4,
+        updated_at=datetime.now(UTC),
+    )
+
+    captured = {}
+
+    def fake_fetch(field, season, contour, scene_id, index_name):
+        captured.update(
+            scene_id=scene_id, index_name=index_name, contour=contour, season=season
         )
-    }
+        return record
 
-    async def fake_get_field_contours(_field_id, _authorization):
-        return contours
-
-    monkeypatch.setattr(service._fields_client, "get_field_contours", fake_get_field_contours)
-    monkeypatch.setattr(
-        service,
-        "_search_scenes",
-        lambda _field_id, _season_id, _aoi_geom, _date_from, _date_to: ([scene], items_by_id),
-    )
-    monkeypatch.setattr(
-        service,
-        "_load_scene_cube",
-        lambda _item, _aoi_geom: make_dataset(1.0),
-    )
+    monkeypatch.setattr(service_module.storage, "fetch_scene_overlay", fake_fetch)
 
     result = await service.get_index_map(field_id, None, "scene-a", "ndvi", "Bearer test")
 
     assert result.overlay.index_name == "ndvi"
-    assert result.overlay.image_url.startswith("data:image/png;base64,")
+    assert result.overlay.image_url == "data:image/png;base64,AAAA"
     assert result.overlay.bounds == [[55.0, 37.0], [55.1, 37.1]]
+    assert captured["scene_id"] == "scene-a"
+    assert captured["index_name"] == "ndvi"
+
+
+@pytest.mark.asyncio
+async def test_get_index_map_returns_404_when_overlay_not_synced(
+    service: DzzService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    field_id = uuid.uuid4()
+    monkeypatch.setattr(
+        service_module.storage, "fetch_scene_overlay", lambda *_args, **_kwargs: None
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await service.get_index_map(field_id, None, "scene-a", "ndvi", "Bearer test")
+
+    assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio

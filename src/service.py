@@ -18,7 +18,7 @@ from shapely.ops import unary_union
 
 from src.clients.fields import FieldContoursClient
 from src.config import settings
-from src.persistence import DzzSceneAnalyticsRecord, storage
+from src.persistence import DzzSceneAnalyticsRecord, DzzSceneOverlayRecord, storage
 from src.schemas.dzz import (
     DzzCompareSchema,
     DzzCompareSummarySchema,
@@ -182,39 +182,24 @@ class DzzService:
         if cached is not None:
             return cached
 
-        field_context = await self._build_field_context(field_id, authorization, contour_id)
-        scene_catalog = self._load_persisted_scene_catalog(
+        scope_contour_id = contour_id or None
+        overlay_record = storage.fetch_scene_overlay(
             field_id,
             season_id,
-            field_context.active_contour_id,
-            resolved_date_from,
-            resolved_date_to,
-        )
-        items_by_id = {}
-        if not scene_catalog:
-            scene_catalog, items_by_id = self._search_scenes(
-                field_id,
-                season_id,
-                field_context.geometry,
-                resolved_date_from,
-                resolved_date_to,
-            )
-        scene = self._find_scene(scene_catalog, scene_id)
-        item = self._resolve_scene_item(
-            field_id,
-            season_id,
-            field_context.geometry,
-            scene,
-            items_by_id,
-        )
-        ds = self._load_scene_cube(item, field_context.geometry)
-        indices = self._calc_indices(ds, item.collection_id)
-        overlay = self._build_overlay(
-            indices[normalized_index],
-            field_context.geometry,
-            scene,
+            scope_contour_id,
+            scene_id,
             normalized_index,
         )
+        if overlay_record is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "Карта индекса для этой сцены ещё не синхронизирована. "
+                    "Нажмите «Обновить», чтобы загрузить актуальные данные ДЗЗ."
+                ),
+            )
+
+        overlay = self._overlay_record_to_schema(overlay_record)
         response = DzzIndexMapSchema(
             field_id=field_id,
             season_id=season_id,
@@ -696,6 +681,14 @@ class DzzService:
             deduped_scenes.values(),
             key=lambda scene: (scene.scene_date, scene.cloud_cover or 999.0),
         )
+        self._backfill_missing_overlays(
+            scene_catalog,
+            items_by_id,
+            field_context.geometry,
+            field_id,
+            season_id,
+            scope_contour_id,
+        )
         ordered_records = [
             persisted_by_scene_id[scene.scene_id]
             for scene in scene_catalog
@@ -844,6 +837,9 @@ class DzzService:
                     msavi=msavi,
                     updated_at=datetime.now(UTC),
                 )
+            )
+            self._persist_overlays_from_indices(
+                indices, aoi_geom, scene, field_id, season_id, contour_id
             )
         return analytics_rows
 
@@ -1014,6 +1010,106 @@ class DzzService:
             actual_max=actual_max,
             mean_value=mean_value,
             mode=mode,
+        )
+
+    def _persist_overlays_from_indices(
+        self,
+        indices: dict,
+        aoi_geom,
+        scene: DzzSceneSchema,
+        field_id: uuid.UUID,
+        season_id: uuid.UUID | None,
+        contour_id: str | None,
+    ) -> None:
+        records: list[DzzSceneOverlayRecord] = []
+        for index_name in VALID_INDICES:
+            array = indices.get(index_name)
+            if array is None:
+                continue
+            try:
+                overlay = self._build_overlay(array, aoi_geom, scene, index_name)
+            except HTTPException:
+                continue
+            records.append(
+                self._overlay_to_record(overlay, field_id, season_id, contour_id)
+            )
+        storage.upsert_scene_overlays(records)
+
+    def _backfill_missing_overlays(
+        self,
+        scene_catalog: list[DzzSceneSchema],
+        items_by_id: dict,
+        aoi_geom,
+        field_id: uuid.UUID,
+        season_id: uuid.UUID | None,
+        contour_id: str | None,
+    ) -> None:
+        for scene in scene_catalog:
+            has_all = all(
+                storage.fetch_scene_overlay(
+                    field_id, season_id, contour_id, scene.scene_id, index_name
+                )
+                is not None
+                for index_name in VALID_INDICES
+            )
+            if has_all:
+                continue
+            item = items_by_id.get(scene.scene_id)
+            if item is None:
+                continue
+            try:
+                ds = self._load_scene_cube(item, aoi_geom)
+                indices = self._calc_indices(ds, item.collection_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Skip overlay backfill for scene %s: %s", scene.scene_id, exc)
+                continue
+            self._persist_overlays_from_indices(
+                indices, aoi_geom, scene, field_id, season_id, contour_id
+            )
+
+    @staticmethod
+    def _overlay_to_record(
+        overlay: DzzRasterOverlaySchema,
+        field_id: uuid.UUID,
+        season_id: uuid.UUID | None,
+        contour_id: str | None,
+    ) -> DzzSceneOverlayRecord:
+        return DzzSceneOverlayRecord(
+            field_id=field_id,
+            season_id=season_id,
+            contour_id=contour_id,
+            scene_id=overlay.scene_id,
+            index_name=overlay.index_name,
+            scene_date=overlay.scene_date,
+            sensor=overlay.sensor,
+            collection=overlay.collection,
+            mode=overlay.mode,
+            image_url=overlay.image_url,
+            bounds=overlay.bounds,
+            display_min=overlay.display_min,
+            display_max=overlay.display_max,
+            actual_min=overlay.actual_min,
+            actual_max=overlay.actual_max,
+            mean_value=overlay.mean_value,
+            updated_at=datetime.now(UTC),
+        )
+
+    @staticmethod
+    def _overlay_record_to_schema(record: DzzSceneOverlayRecord) -> DzzRasterOverlaySchema:
+        return DzzRasterOverlaySchema(
+            scene_id=record.scene_id,
+            scene_date=record.scene_date,
+            sensor=record.sensor,
+            collection=record.collection,
+            index_name=record.index_name,
+            image_url=record.image_url,
+            bounds=record.bounds,
+            display_min=record.display_min,
+            display_max=record.display_max,
+            actual_min=record.actual_min,
+            actual_max=record.actual_max,
+            mean_value=record.mean_value,
+            mode=record.mode,
         )
 
     @staticmethod

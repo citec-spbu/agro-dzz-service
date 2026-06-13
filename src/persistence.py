@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,27 @@ class DzzSceneAnalyticsRecord:
     evi: float | None
     ndwi: float | None
     msavi: float | None
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class DzzSceneOverlayRecord:
+    field_id: uuid.UUID
+    season_id: uuid.UUID | None
+    contour_id: str | None
+    scene_id: str
+    index_name: str
+    scene_date: date
+    sensor: str
+    collection: str
+    mode: str
+    image_url: str
+    bounds: list[list[float]]
+    display_min: float
+    display_max: float
+    actual_min: float | None
+    actual_max: float | None
+    mean_value: float | None
     updated_at: datetime
 
 
@@ -242,6 +264,112 @@ class DzzPersistence:
             )
             connection.commit()
 
+    def fetch_scene_overlay(
+        self,
+        field_id: uuid.UUID,
+        season_id: uuid.UUID | None,
+        contour_id: str | None,
+        scene_id: str,
+        index_name: str,
+    ) -> DzzSceneOverlayRecord | None:
+        scope_contour_id = contour_id or ""
+        scope_season_id = str(season_id) if season_id else ""
+        columns = """
+            field_id, season_id, contour_id, scene_id, index_name,
+            scene_date, sensor, collection_name, mode, image_url, bounds,
+            display_min, display_max, actual_min, actual_max, mean_value, updated_at
+        """
+
+        if self._is_postgres():
+            query = f"""
+                SELECT {columns}
+                FROM dzz_scene_overlay
+                WHERE field_id = %s AND season_id = %s AND contour_id = %s
+                  AND scene_id = %s AND index_name = %s
+                LIMIT 1
+            """
+            params: list[Any] = [
+                str(field_id), scope_season_id, scope_contour_id, scene_id, index_name
+            ]
+            with self._pg_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, params)
+                    row = cursor.fetchone()
+            return self._to_overlay_record(row) if row else None
+
+        query = f"""
+            SELECT {columns}
+            FROM dzz_scene_overlay
+            WHERE field_id = ? AND season_id = ? AND contour_id = ?
+              AND scene_id = ? AND index_name = ?
+            LIMIT 1
+        """
+        params = [str(field_id), scope_season_id, scope_contour_id, scene_id, index_name]
+        with sqlite3.connect(self._sqlite_db_path()) as connection:
+            row = connection.execute(query, params).fetchone()
+        return self._to_overlay_record(row) if row else None
+
+    def upsert_scene_overlays(self, rows: list[DzzSceneOverlayRecord]) -> None:
+        if not rows:
+            return
+
+        prepared_rows = [self._serialize_overlay_record(row) for row in rows]
+        columns = """
+            field_id, season_id, contour_id, scene_id, index_name,
+            scene_date, sensor, collection_name, mode, image_url, bounds,
+            display_min, display_max, actual_min, actual_max, mean_value, updated_at
+        """
+        conflict_update = """
+            scene_date = excluded.scene_date,
+            sensor = excluded.sensor,
+            collection_name = excluded.collection_name,
+            mode = excluded.mode,
+            image_url = excluded.image_url,
+            bounds = excluded.bounds,
+            display_min = excluded.display_min,
+            display_max = excluded.display_max,
+            actual_min = excluded.actual_min,
+            actual_max = excluded.actual_max,
+            mean_value = excluded.mean_value,
+            updated_at = excluded.updated_at
+        """
+
+        if self._is_postgres():
+            with self._pg_connection() as connection:
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        f"""
+                        INSERT INTO dzz_scene_overlay ({columns})
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT(field_id, season_id, contour_id, scene_id, index_name)
+                        DO UPDATE SET {conflict_update}
+                        """,
+                        prepared_rows,
+                    )
+                connection.commit()
+            return
+
+        sqlite_rows = [
+            (
+                row[0], row[1], row[2], row[3], row[4],
+                row[5].isoformat(), row[6], row[7], row[8], row[9], row[10],
+                row[11], row[12], row[13], row[14], row[15], row[16].isoformat(),
+            )
+            for row in prepared_rows
+        ]
+        with sqlite3.connect(self._sqlite_db_path()) as connection:
+            connection.executemany(
+                f"""
+                INSERT INTO dzz_scene_overlay ({columns})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(field_id, season_id, contour_id, scene_id, index_name)
+                DO UPDATE SET {conflict_update}
+                """,
+                sqlite_rows,
+            )
+            connection.commit()
+
     def _init_postgres_schema(self) -> None:
         with self._pg_connection() as connection:
             with connection.cursor() as cursor:
@@ -270,6 +398,37 @@ class DzzPersistence:
                     """
                     CREATE INDEX IF NOT EXISTS idx_dzz_scene_analytics_lookup
                     ON dzz_scene_analytics (field_id, season_id, contour_id, scene_date)
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS dzz_scene_overlay (
+                        id BIGSERIAL PRIMARY KEY,
+                        field_id TEXT NOT NULL,
+                        season_id TEXT NOT NULL DEFAULT '',
+                        contour_id TEXT NOT NULL DEFAULT '',
+                        scene_id TEXT NOT NULL,
+                        index_name TEXT NOT NULL,
+                        scene_date DATE NOT NULL,
+                        sensor TEXT NOT NULL,
+                        collection_name TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        image_url TEXT NOT NULL,
+                        bounds TEXT NOT NULL,
+                        display_min DOUBLE PRECISION NOT NULL,
+                        display_max DOUBLE PRECISION NOT NULL,
+                        actual_min DOUBLE PRECISION NULL,
+                        actual_max DOUBLE PRECISION NULL,
+                        mean_value DOUBLE PRECISION NULL,
+                        updated_at TIMESTAMPTZ NOT NULL,
+                        UNIQUE(field_id, season_id, contour_id, scene_id, index_name)
+                    )
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_dzz_scene_overlay_lookup
+                    ON dzz_scene_overlay (field_id, season_id, contour_id, scene_id, index_name)
                     """
                 )
             connection.commit()
@@ -301,6 +460,37 @@ class DzzPersistence:
                 """
                 CREATE INDEX IF NOT EXISTS idx_dzz_scene_analytics_lookup
                 ON dzz_scene_analytics (field_id, season_id, contour_id, scene_date)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dzz_scene_overlay (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    field_id TEXT NOT NULL,
+                    season_id TEXT NOT NULL DEFAULT '',
+                    contour_id TEXT NOT NULL DEFAULT '',
+                    scene_id TEXT NOT NULL,
+                    index_name TEXT NOT NULL,
+                    scene_date TEXT NOT NULL,
+                    sensor TEXT NOT NULL,
+                    collection_name TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    image_url TEXT NOT NULL,
+                    bounds TEXT NOT NULL,
+                    display_min REAL NOT NULL,
+                    display_max REAL NOT NULL,
+                    actual_min REAL NULL,
+                    actual_max REAL NULL,
+                    mean_value REAL NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(field_id, season_id, contour_id, scene_id, index_name)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dzz_scene_overlay_lookup
+                ON dzz_scene_overlay (field_id, season_id, contour_id, scene_id, index_name)
                 """
             )
             connection.commit()
@@ -412,6 +602,62 @@ class DzzPersistence:
             row.ndwi,
             row.msavi,
             row.updated_at,
+        )
+
+    @staticmethod
+    def _serialize_overlay_record(row: DzzSceneOverlayRecord) -> tuple[Any, ...]:
+        return (
+            str(row.field_id),
+            str(row.season_id) if row.season_id else "",
+            row.contour_id or "",
+            row.scene_id,
+            row.index_name,
+            row.scene_date,
+            row.sensor,
+            row.collection,
+            row.mode,
+            row.image_url,
+            json.dumps(row.bounds),
+            row.display_min,
+            row.display_max,
+            row.actual_min,
+            row.actual_max,
+            row.mean_value,
+            row.updated_at,
+        )
+
+    @staticmethod
+    def _to_overlay_record(row: tuple) -> DzzSceneOverlayRecord:
+        updated_at = row[16]
+        if isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at)
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        else:
+            updated_at = updated_at.astimezone(UTC)
+
+        scene_date = row[5]
+        if isinstance(scene_date, str):
+            scene_date = date.fromisoformat(scene_date)
+
+        return DzzSceneOverlayRecord(
+            field_id=uuid.UUID(str(row[0])),
+            season_id=uuid.UUID(str(row[1])) if row[1] else None,
+            contour_id=row[2] or None,
+            scene_id=row[3],
+            index_name=row[4],
+            scene_date=scene_date,
+            sensor=row[6],
+            collection=row[7],
+            mode=row[8],
+            image_url=row[9],
+            bounds=json.loads(row[10]),
+            display_min=row[11],
+            display_max=row[12],
+            actual_min=row[13],
+            actual_max=row[14],
+            mean_value=row[15],
+            updated_at=updated_at,
         )
 
     @staticmethod
